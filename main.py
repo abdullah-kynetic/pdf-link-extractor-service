@@ -2,9 +2,12 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import tempfile, os
 from typing import Any, Dict
-from extract_links import clean_agenda  # make sure this function returns a dict/list
-# NEW: import the link-extraction helpers
-from extract_links import _get_hyperlinks_from_pdf, _get_pdf_title_from_source
+from extract_links import clean_agenda
+from extract_links import (
+    _get_hyperlinks_from_pdf,
+    _get_pdf_title_from_source,
+    _match_attachments_to_docket_list,
+)
 
 app = FastAPI(title="PDF Link Extractor", version="1.0.0")
 
@@ -12,6 +15,7 @@ app = FastAPI(title="PDF Link Extractor", version="1.0.0")
 def healthz():
     return {"ok": True}
 
+# /analyze → return all_links
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -26,9 +30,9 @@ async def analyze(file: UploadFile = File(...)):
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Your script must RETURN a JSON-serializable object (not print)
-        result: Dict[str, Any] = clean_agenda(tmp_path)
-        return JSONResponse(content=result)
+        links = _get_hyperlinks_from_pdf(tmp_path)
+        all_links = await _get_pdf_title_from_source(links)
+        return JSONResponse(content={"all_links": all_links})
 
     except HTTPException:
         raise
@@ -36,10 +40,12 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except OSError: pass
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
-# NEW: returns the enriched list of links with titles (all_links)
+# /analyze-links → return docket_list with matched attachments
 @app.post("/analyze-links")
 async def analyze_links(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -54,11 +60,12 @@ async def analyze_links(file: UploadFile = File(...)):
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Extract raw links from the agenda PDF
+        docket_list: Dict[str, Any] = clean_agenda(tmp_path)
         links = _get_hyperlinks_from_pdf(tmp_path)
-        # Enrich each link with a fetched title (async)
         all_links = await _get_pdf_title_from_source(links)
-        return JSONResponse(content=all_links)
+
+        final_result = _match_attachments_to_docket_list(docket_list, all_links)
+        return JSONResponse(content=final_result)
 
     except HTTPException:
         raise
@@ -66,5 +73,7 @@ async def analyze_links(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except OSError: pass
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
